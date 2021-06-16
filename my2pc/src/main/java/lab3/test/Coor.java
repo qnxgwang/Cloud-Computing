@@ -1,6 +1,6 @@
 package lab3.test;
 
-import lab3.my2pc.entity.c.Address;
+import lab3.entity.c.Address;
 
 import java.util.ArrayList;
 import java.util.HashMap;

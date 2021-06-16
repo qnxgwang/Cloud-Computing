@@ -1,14 +1,13 @@
 package lab3.entity.c;
 
-public interface Status {
-    int COMMAND = 0x01;
+public enum Status {
+    COMMAND,
 
-    int WAIT_READY = 0x02;
+    WAIT_READY,
 
-    int COMMIT = 0x03;
+    COMMIT,
 
-    int WAIT_ACK = 0x04;
+    WAIT_ACK,
 
-    int CLIENT = 0x05;
-
+    CLIENT,
 }

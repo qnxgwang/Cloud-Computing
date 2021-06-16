@@ -11,6 +11,7 @@ import java.net.Socket;
 import java.util.*;
 import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.BlockingQueue;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.stream.Collectors;
 
 public class Coordinator extends Thread{
@@ -22,7 +23,7 @@ public class Coordinator extends Thread{
     private static Socket clientSocket;
 
     /* 状态机码 */
-    private static int status = 0x00;
+    private Status status;
 
     /* 读写超时间隔 默认100ms */
     private static int SOCKET_READ_WRITE_TIME_OUT = 100;
@@ -55,10 +56,43 @@ public class Coordinator extends Thread{
         status = Status.CLIENT;
     }
 
-    @Override
-    public void run() {
+    /* 测试用构造方法 */
+    public Coordinator(){
+        deadList.add(new Address("127.0.0.1", 8002));
+        status = Status.COMMAND;
+        queue.add(new Task(new Date(), "SET\r\nKEY1\r\nV1"));
+        queue.add(new Task(new Date(), "SET\r\nKEY2\r\nV2"));
+        queue.add(new Task(new Date(), "SET\r\nKEY3\r\nV3"));
+        queue.add(new Task(new Date(), "GET\r\nKEY1"));
+        queue.add(new Task(new Date(), "GET\r\nKEY3"));
+    }
 
-        // 协调者向参与者发起连接请求
+    /* 测试用main函数 */
+    public static void main(String[] args) {
+        Coordinator c = new Coordinator();
+        c.start();
+    }
+    enum ResultType{
+        SUCCESS,
+        FAILURE,
+    }
+    static class Result{
+        private ResultType resultType;
+        private String value;
+
+        public Result(ResultType resultType, String value) {
+            this.resultType = resultType;
+            this.value = value;
+        }
+
+        public String getValue() {
+            return value;
+        }
+    }
+
+    /* 协调者向参与者发起连接请求 */
+    public void connect(){
+
         deadList.forEach(address -> {
             Socket socket = null;
             try {
@@ -71,42 +105,56 @@ public class Coordinator extends Thread{
         aliveMap.forEach((address, socket)->{
             deadList.remove(address);
         });
+    }
+
+    @Override
+    public void run() {
+
+        connect();
 
         //状态机
         while (true){
             switch(status){
-                case Status.CLIENT:{
+                case CLIENT:{
                     monitorClient();
                     status = Status.COMMAND;
                     break;
                 }
-                case Status.COMMAND:{
-                    sendTask();
-                    status = Status.WAIT_READY;
+                case COMMAND:{
+                    if(sendTask())
+                        status = Status.WAIT_READY;
                     break;
                 }
-                case Status.WAIT_READY:{
-                    waitReady();
-                    status = Status.COMMIT;
+                case WAIT_READY:{
+                    if(waitReady())
+                        status = Status.COMMIT;
+                    else
+                        status = Status.COMMAND;
                     break;
                 }
-                case Status.COMMIT:{
-                    sendAccept();
-                    status = Status.WAIT_ACK;
+                case COMMIT:{
+                    if (sendAccept())
+                        status = Status.WAIT_ACK;
+                    else
+                        status = Status.COMMAND;
                     break;
                 }
-                case Status.WAIT_ACK:{
-                    waitAck();
-                    status = Status.COMMAND;
+                case WAIT_ACK:{
+                    if(waitAck())
+                        status = Status.COMMAND;
+                    else
+                        status = Status.COMMAND;
                     break;
                 }
                 default:break;
             }
         }
+
     }
 
     /* 监听客户机请求 */
     public void monitorClient() {
+
         String msg = "";
         try{
             ServerSocket serverSocket = new ServerSocket(localAddress.getPort());
@@ -123,77 +171,95 @@ public class Coordinator extends Thread{
         }catch (IOException e){
             e.printStackTrace();
         }
+
     }
 
     /* 响应客户机请求 */
     public void replyClient(String msg){
+
         try{
             BufferedWriter bufferedWriter =
                     new BufferedWriter(new OutputStreamWriter(clientSocket.getOutputStream(), "UTF-8"));
             bufferedWriter.write(msg);
-            bufferedWriter.close();
             clientSocket.close();
         }catch (IOException e){
             e.printStackTrace();
         }
+
     }
 
     /* 向参与者发送第一阶段请求 */
-    public void sendTask() {
+    public boolean sendTask() {
 
         try {
             Task task = queue.take();
+            AtomicBoolean flag = new AtomicBoolean(true);
             aliveMap.forEach((address, socket)->{
-                sendTaskByAddress(socket, task);
+                if(! sendTaskByAddress(socket, task))
+                    flag.set(false);
             });
+            return flag.get();
         }catch (InterruptedException e){
-            e.printStackTrace();
+            return false;
         }
 
     }
 
-    public void sendTaskByAddress(Socket socket, Task task){
+    public boolean sendTaskByAddress(Socket socket, Task task){
+
         String source = task.getMsg();
         List<String> stringList = Arrays.stream(source.split(Command.SPLIT)).collect(Collectors.toList());
-
         command = stringList.remove(0);
         System.out.println(command);
+
         switch (command){
             case Command.SET:
             case Command.GET: {
                 String msg = source;
-                sendMessageByAddress(socket, msg);
-                break;
+                return sendMessageByAddress(socket, msg);
             }
             case Command.DELETE:{
                 List<String> sendList = DivideUtil.getList(stringList);
+
                 sendMessageByAddress(socket, Command.DELETE + Command.SPLIT + sendList.size());
                 sendList.forEach(str->{
                     sendMessageByAddress(socket, str);
                 });
-                break;
+                return true;
             }
-            default:break;
+            default: {
+                return false;
+            }
+
         }
+
     }
 
     /* 等待第一阶段响应 */
     public boolean waitReady(){
 
+        AtomicBoolean flag = new AtomicBoolean(true);
         aliveMap.forEach((address, socket)->{
-            String msg = receiveMessageByAddress(socket);
-            System.out.println(msg);
+            Result result = receiveMessageByAddress(socket);
+            if((result.resultType == ResultType.FAILURE) ||
+                            ! (Objects.equals(result.getValue(), Command.OK)))
+                flag.set(false);
         });
 
-        return true;
+        return flag.get();
+
     }
 
     /* 向参与者发送第二阶段请求 */
-    public void sendAccept(){
+    public boolean sendAccept(){
 
+        AtomicBoolean flag = new AtomicBoolean(true);
         aliveMap.forEach((address, socket)->{
-            sendMessageByAddress(socket, Command.REPLY);
+            if(! sendMessageByAddress(socket, Command.ACCEPT))
+                flag.set(false);
         });
+
+        return flag.get();
 
     }
 
@@ -203,53 +269,71 @@ public class Coordinator extends Thread{
         switch (command){
             case Command.GET:
             case Command.DELETE: {
+                AtomicBoolean flag = new AtomicBoolean(true);
                 aliveMap.forEach((address, socket)->{
-                    String msg = receiveMessageByAddress(socket);
-                    System.out.println(msg);
-                    replyClient(msg);
+                    Result result = receiveMessageByAddress(socket);
+                    if(result.resultType == ResultType.SUCCESS)
+                        //replyClient(result.getValue());
+                        System.out.println(result.getValue());
+                    else
+                        flag.set(false);
                 });
-                break;
+                return flag.get();
             }
             case Command.SET:{
+                AtomicBoolean flag = new AtomicBoolean(true);
                 aliveMap.forEach((address, socket)->{
-                    String msg = receiveMessageByAddress(socket);
-                    System.out.println(msg);
+                    Result result = receiveMessageByAddress(socket);
+                    if(result.resultType == ResultType.SUCCESS && Objects.equals(result.getValue(), Command.ACK))
+                        //replyClient(result.getValue());
+                        System.out.println(result.getValue());
+                    else
+                        flag.set(false);
                 });
-                break;
+                return flag.get();
             }
-            default:break;
+            default: {
+                return false;
+            }
         }
-        return true;
+
     }
 
-    public void sendMessageByAddress(Socket socket, String msg){
+    public boolean sendMessageByAddress(Socket socket, String msg){
+
         try {
             socket.setSoTimeout(SOCKET_READ_WRITE_TIME_OUT);
             SocketUtil.writeMessage(socket, new Message(msg));
-            socket.close();
         } catch (IOException e){
-            e.printStackTrace();
-            String IP = socket.getInetAddress().getHostAddress();
-            int port = socket.getPort();
-            aliveMap.remove(IP);
-            deadList.add(new Address(IP,port));
+            unConnect(socket);
+            return false;
         }
+
+        return true;
+
     }
 
-    public String receiveMessageByAddress(Socket socket) {
-        Message message = null;
+    public Result receiveMessageByAddress(Socket socket) {
+
+        Message message;
         try{
             socket.setSoTimeout(SOCKET_READ_WRITE_TIME_OUT);
             message = SocketUtil.readMessage(socket);
-            socket.close();
         }catch (IOException | ClassNotFoundException e){
-            e.printStackTrace();
-            String IP = socket.getInetAddress().getHostAddress();
-            int port = socket.getPort();
-            aliveMap.remove(IP);
-            deadList.add(new Address(IP,port));
+            unConnect(socket);
+            return new Result(ResultType.FAILURE, null);
         }
-        return message.getMsg();
+        return new Result(ResultType.SUCCESS, message.getMsg());
+
+    }
+
+    public void unConnect(Socket socket){
+
+        String IP = socket.getInetAddress().getHostAddress();
+        int port = socket.getPort();
+        aliveMap.remove(IP);
+        deadList.add(new Address(IP,port));
+
     }
 
 }
