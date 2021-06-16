@@ -1,4 +1,4 @@
-# Cloud-Computing 云计算课程实验设计
+# 云计算课程实验设计
 
 ## finished
 ### mypool 实现大数据数独运算的线程池设计
